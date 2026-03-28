@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 .env
 __pycache__/
 transcribe_tmp/
@@ -6,6 +7,8 @@ transcribe_tmp/
 *.pyc
 venv/
 .pytest_cache/
+=======
+>>>>>>> origin/main
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -212,4 +215,8 @@ cython_debug/
 # Marimo
 marimo/_static/
 marimo/_lsp/
+<<<<<<< HEAD
 __marimo__/
+=======
+__marimo__/
+>>>>>>> origin/main
