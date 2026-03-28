@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+boto3
+bcrypt
+python-jose[cryptography]
+pydantic
+pydantic-settings
+hypothesis
+pytest
+pytest-asyncio
+moto[s3,dynamodb]
+httpx

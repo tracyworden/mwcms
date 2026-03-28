@@ -1,0 +1,158 @@
+/* ===== CSS Variables / Theme ===== */
+:root {
+  --color-bg: #f8f8fa;
+  --color-surface: #fff;
+  --color-surface-alt: #f0eff4;
+  --color-text: #4a4458;
+  --color-text-heading: #1a1523;
+  --color-text-muted: #8e8c99;
+  --color-border: #e4e2e9;
+  --color-accent: #7c3aed;
+  --color-accent-hover: #6d28d9;
+  --color-accent-text: #fff;
+  --color-error: #dc2626;
+  --color-error-bg: #fef2f2;
+  --color-disabled: #c4c1cc;
+  --color-placeholder-bg: #e4e2e9;
+  --color-placeholder-icon: #8e8c99;
+  --color-link: #7c3aed;
+  --color-shadow: rgba(0, 0, 0, 0.08);
+
+  --font-sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --shadow-sm: 0 1px 3px var(--color-shadow);
+  --shadow-md: 0 4px 12px var(--color-shadow);
+  --shadow-lg: 0 8px 24px var(--color-shadow);
+
+  --sidebar-width: 260px;
+  --header-height: 56px;
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #111118;
+    --color-surface: #1c1c26;
+    --color-surface-alt: #25252f;
+    --color-text: #a09dab;
+    --color-text-heading: #eeedf0;
+    --color-text-muted: #6b6878;
+    --color-border: #2e2d38;
+    --color-accent: #a78bfa;
+    --color-accent-hover: #8b5cf6;
+    --color-accent-text: #111118;
+    --color-error: #f87171;
+    --color-error-bg: #2d1b1b;
+    --color-disabled: #44424e;
+    --color-placeholder-bg: #2e2d38;
+    --color-placeholder-icon: #6b6878;
+    --color-link: #a78bfa;
+    --color-shadow: rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* ===== Reset & Base ===== */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--color-text-heading);
+  margin: 0;
+}
+
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; }
+
+p { margin: 0; }
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+/* ===== Buttons ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 1rem;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+.btn:hover { background: var(--color-surface-alt); box-shadow: var(--shadow-sm); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled:hover { background: var(--color-surface); box-shadow: none; }
+
+.btn-primary {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent);
+}
+.btn-primary:hover { background: var(--color-accent-hover); }
+.btn-primary:disabled { background: var(--color-accent); }
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-ghost:hover { background: var(--color-surface-alt); }
+
+/* ===== Form Controls ===== */
+.input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  color: var(--color-text-heading);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.input:focus { border-color: var(--color-accent); }
+
+.select {
+  padding: 0.45rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+/* ===== Utility ===== */
+.error-text { color: var(--color-error); }
+.error-box { background: var(--color-error-bg); color: var(--color-error); padding: 0.5rem 0.75rem; border-radius: var(--radius-md); }
+.muted { color: var(--color-text-muted); }

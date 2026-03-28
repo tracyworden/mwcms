@@ -1,0 +1,639 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Media Viewer - ECS Fargate deployment with security hardening
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Application domain (e.g. mw.mzwcms.com)
+
+  HostedZoneId:
+    Type: String
+    Description: Route 53 hosted zone ID for the parent domain
+
+  ImageUri:
+    Type: String
+    Description: ECR image URI (account.dkr.ecr.region.amazonaws.com/repo:tag)
+
+  SessionSecretArn:
+    Type: String
+    Description: SSM Parameter Store ARN for SESSION_SECRET
+
+  AdminPrincipalArn:
+    Type: String
+    Description: IAM ARN for admin console/CLI access to S3 bucket
+
+  S3BucketName:
+    Type: String
+    Default: mw-family-videos-1
+    Description: S3 bucket name for media storage
+
+  DynamoDBTableName:
+    Type: String
+    Default: User_Table
+    Description: DynamoDB table name for user data
+
+  CorsAllowedOrigins:
+    Type: String
+    Description: CORS allowed origins (comma-separated)
+
+Resources:
+  # ============================================================
+  # Network - VPC, Subnets, Internet Gateway, Route Tables
+  # ============================================================
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: media-viewer-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: media-viewer-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (for ALB) - 2 AZs
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: media-viewer-public-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: media-viewer-public-2
+
+  # Private Subnets (for ECS tasks) - 2 AZs
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: media-viewer-private-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: media-viewer-private-2
+
+  # Public Route Table with IGW route
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: media-viewer-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private Route Table (no internet route - VPC endpoints added in task 4.2)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: media-viewer-private-rt
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ============================================================
+  # VPC Endpoints - Private connectivity to AWS services
+  # ============================================================
+
+  # Gateway Endpoints (free)
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  DynamoDBGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  # VPC Endpoint Security Group - allows HTTPS from ECS tasks
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC interface endpoints
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: media-viewer-vpce-sg
+
+  # Interface Endpoints (ECR, CloudWatch Logs)
+  ECRApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  ECRDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # ============================================================
+  # Security Groups - ALB and ECS
+  # ============================================================
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          DestinationSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: media-viewer-alb-sg
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS Fargate tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationSecurityGroupId: !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: media-viewer-ecs-sg
+
+  # ============================================================
+  # IAM Roles - Task Role and Execution Role
+  # ============================================================
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TaskRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3ReadMedia
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:HeadObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3BucketName}"
+                  - !Sub "arn:aws:s3:::${S3BucketName}/*"
+              - Sid: DynamoDBReadUser
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}"
+      Tags:
+        - Key: Name
+          Value: media-viewer-task-role
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ExecutionRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRPull
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: SSMReadSecret
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource: !Ref SessionSecretArn
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/media-viewer:*"
+      Tags:
+        - Key: Name
+          Value: media-viewer-execution-role
+
+  # ============================================================
+  # Application Load Balancer, Target Group, and Listeners
+  # ============================================================
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: media-viewer-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: media-viewer-alb
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: media-viewer-tg
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 8000
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      UnhealthyThresholdCount: 3
+      HealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200'
+      Tags:
+        - Key: Name
+          Value: media-viewer-tg
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref ACMCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  # ============================================================
+  # DNS/TLS - ACM Certificate and Route 53 Record
+  # ============================================================
+
+  ACMCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: media-viewer-certificate
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+
+  # ============================================================
+  # ECR Repository - Private container image registry
+  # ============================================================
+
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only 5 most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: media-viewer-ecr
+
+  # ============================================================
+  # CloudWatch Logs - Container log group
+  # ============================================================
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/media-viewer
+      RetentionInDays: 30
+
+  # ============================================================
+  # ECS - Cluster, Task Definition, and Service
+  # ============================================================
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: media-viewer-cluster
+      Tags:
+        - Key: Name
+          Value: media-viewer-cluster
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: media-viewer
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: media-viewer
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: S3_BUCKET_NAME
+              Value: !Ref S3BucketName
+            - Name: AWS_REGION
+              Value: !Ref 'AWS::Region'
+            - Name: DYNAMODB_TABLE_NAME
+              Value: !Ref DynamoDBTableName
+            - Name: CORS_ALLOWED_ORIGINS
+              Value: !Ref CorsAllowedOrigins
+          Secrets:
+            - Name: SESSION_SECRET
+              ValueFrom: !Ref SessionSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: media-viewer-service
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: media-viewer
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # S3 Bucket Policy - Deny all except Task_Role and Admin_Principal
+  # ============================================================
+  # NOTE: The bucket mw-family-videos-1 already exists and is NOT created by
+  # this template. Block Public Access (all four settings = true) and default
+  # encryption (SSE-S3 / AES-256) must be configured on the existing bucket
+  # via the AWS CLI or console:
+  #
+  #   aws s3api put-public-access-block --bucket mw-family-videos-1 \
+  #     --public-access-block-configuration \
+  #     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  #
+  #   aws s3api put-bucket-encryption --bucket mw-family-videos-1 \
+  #     --server-side-encryption-configuration \
+  #     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyAllExceptAllowed
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}"
+              - !Sub "arn:aws:s3:::${S3BucketName}/*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !GetAtt TaskRole.Arn
+                  - !Ref AdminPrincipalArn
+
+  # ============================================================
+  # DynamoDB User_Table - Existing resource configuration
+  # ============================================================
+  # The DynamoDB table User_Table already exists and is NOT created by this
+  # template. CloudFormation cannot manage an existing DynamoDB table without
+  # importing it. Enable point-in-time recovery (PITR) via CLI:
+  #
+  #   aws dynamodb update-continuous-backups --table-name User_Table \
+  #     --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true
+  #
+  # Default encryption (AWS-owned key) and PAY_PER_REQUEST billing mode are
+  # already configured on the existing table. No additional CLI commands needed
+  # for those settings.
+  #
+  # Requirements satisfied:
+  #   4.4 - Point-in-time recovery enabled
+  #   4.5 - Server-side encryption with AWS-owned key (default)
+  #   10.3 - On-demand (PAY_PER_REQUEST) billing mode
+
+  # ============================================================
+  # SSM Parameter Store - SESSION_SECRET (SecureString)
+  # ============================================================
+  # The SSM SecureString parameter must be created BEFORE deploying this stack:
+  #
+  #   aws ssm put-parameter --name /media-viewer/SESSION_SECRET \
+  #     --type SecureString --value "<your-secret-value>"
+  #
+  # Then pass the ARN as the SessionSecretArn stack parameter:
+  #   arn:aws:ssm:{region}:{account}:parameter/media-viewer/SESSION_SECRET
+  #
+  # The Execution_Role has ssm:GetParameters scoped to this exact ARN.
+  # ECS injects it into the container as the SESSION_SECRET env var at task startup.
+  # If the parameter is missing, the ECS task will fail to start (req 6.6).
+  #
+  # CloudFormation does not create this resource because doing so would require
+  # the secret value as a stack parameter, exposing it in plaintext in the
+  # CloudFormation console, CLI history, and event logs. The standard pattern
+  # for secrets is to create them out-of-band and reference by ARN.
+  #
+  # Requirements satisfied:
+  #   6.1 - SSM Parameter Store SecureString entry for SESSION_SECRET
+  #   6.2 - ECS task definition injects SESSION_SECRET from SessionSecretArn
+  #   6.3 - Execution_Role scoped to exact parameter ARN
+  #   6.6 - Missing parameter causes ECS task startup failure
